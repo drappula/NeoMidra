@@ -122,6 +122,7 @@ install_dir_ok:
     WriteRegStr  HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "DisplayIcon"      "$INSTDIR\SteaMidra.ico"
     WriteRegStr  HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "UninstallString"  '"$INSTDIR\Uninstall.exe"'
     WriteRegStr  HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "QuietUninstallString" '"$INSTDIR\Uninstall.exe" /S'
+    WriteRegStr  HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "InstallLocation" "$INSTDIR"
     WriteRegStr  HKCU "Software\${COMPANY}\${APPNAME}" "InstallDir" "$INSTDIR"
 
 
@@ -252,23 +253,22 @@ SectionEnd
 ; Uninstaller
 ; ============================================================
 ; un.onInit — never let the uninstaller delete a folder that isn't
-; a real, dedicated SteaMidra install. $INSTDIR used to come from
-; the registry InstallDir value (the folder typed at install time),
-; so a stale or shared folder made `RMDir /r` wipe unrelated trees.
-; Two guards:
-;   1. Pin the target to where this exe actually lives — Uninstall.exe
-;      was written into the real install dir at install time, so a
-;      stale/corrupted registry value can't redirect the wipe.
+; a real, dedicated SteaMidra install. Two guards:
+;   1. Target = InstallDir written at install time. $EXEDIR is useless
+;      here: NSIS copies the uninstaller to %TEMP%\~nsuN.tmp and runs
+;      it there, so $EXEDIR is the temp dir, not the install dir.
 ;   2. The folder must be named "SteaMidra" AND contain the app exe.
 ;      Presence of the exe alone is not enough: picking a folder that
 ;      merely contains the exe next to other data still passes an exe
 ;      check, then RMDir /r removes everything inside it. The name
 ;      requirement proves the folder is dedicated.
 Function un.onInit
-    ; The exe's own directory IS the install dir: "$INSTDIR\Uninstall.exe"
-    ; was written there by the installer, so Uninstall.exe always sits
-    ; inside the real install folder.
-    StrCpy $INSTDIR "$EXEDIR"
+    SetRegView 64
+    ReadRegStr $INSTDIR HKCU "Software\${COMPANY}\${APPNAME}" "InstallDir"
+    StrCmp $INSTDIR "" 0 un_have_dir
+    ; Registry gone (or never written): fall back to the ARP entry.
+    ReadRegStr $INSTDIR HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "InstallLocation"
+un_have_dir:
     ${GetFileName} "$INSTDIR" $0
     StrCmp $0 "${APPNAME}" 0 un_bad
     IfFileExists "$INSTDIR\${EXENAME}" un_ok

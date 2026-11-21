@@ -32,19 +32,33 @@ _TOKEN_URI = "https://oauth2.googleapis.com/token"
 
 
 def _client_config():
+    # sff/core/_gc.py is gitignored, so release builds ship without it. Fall
+    # back to env vars or <data>/gdrive_client.json so the feature works there.
+    client_id = client_secret = ""
     try:
         from sff.core._gc import get_ci, get_cs
-        return {
-            "installed": {
-                "client_id": get_ci(),
-                "client_secret": get_cs(),
-                "auth_uri": _AUTH_URI,
-                "token_uri": _TOKEN_URI,
-                "redirect_uris": ["http://localhost"],
-            }
-        }
+        client_id, client_secret = get_ci(), get_cs()
     except ImportError:
+        client_id = os.environ.get("SFF_GDRIVE_CLIENT_ID", "")
+        client_secret = os.environ.get("SFF_GDRIVE_CLIENT_SECRET", "")
+        if not (client_id and client_secret):
+            try:
+                raw = json.loads((sff_data_dir() / "gdrive_client.json").read_text(encoding="utf-8"))
+                client_id = raw.get("client_id", "")
+                client_secret = raw.get("client_secret", "")
+            except (OSError, ValueError):
+                return None
+    if not (client_id and client_secret):
         return None
+    return {
+        "installed": {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "auth_uri": _AUTH_URI,
+            "token_uri": _TOKEN_URI,
+            "redirect_uris": ["http://localhost"],
+        }
+    }
 
 
 def is_available():

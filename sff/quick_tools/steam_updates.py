@@ -21,6 +21,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+_KEY = "bootstrapperinhibitall"
+
 
 def _atomic_write(target: Path, payload: str) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -32,11 +34,56 @@ def _atomic_write(target: Path, payload: str) -> None:
     tmp.replace(target)
 
 
-def block_updates(steam_path: Path) -> None:
+def get_state(steam_path: Path) -> str:
+    """'blocked', 'unblocked', or 'unknown' (no file / no such line)."""
+    cfg = steam_path / "steam.cfg"
+    try:
+        if not cfg.is_file():
+            return "unknown"
+        for line in cfg.read_text(encoding="utf-8", errors="replace").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, _, val = stripped.partition("=")
+            if key.strip().lower() != _KEY:
+                continue
+            value = val.strip().lower()
+            if value in ("enable", "enabled", "true", "1", "yes"):
+                return "blocked"
+            if value in ("false", "0", "no", "disable", "disabled"):
+                return "unblocked"
+            return "unknown"
+        return "unknown"
+    except OSError as exc:
+        logger.warning("steam_updates get_state failed: %s", exc)
+        return "unknown"
+
+
+def _set_inhibit(steam_path: Path, value: str) -> None:
+    """Rewrite the BootStrapperInhibitAll line, keeping every other line."""
     target = steam_path / "steam.cfg"
-    _atomic_write(target, "BootStrapperInhibitAll=Enable\n")
+    lines = []
+    if target.is_file():
+        lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+    out = []
+    replaced = False
+    for line in lines:
+        stripped = line.strip()
+        if "=" in stripped and not stripped.startswith("#"):
+            key, _, _ = stripped.partition("=")
+            if key.strip().lower() == _KEY:
+                out.append(f"BootStrapperInhibitAll={value}")
+                replaced = True
+                continue
+        out.append(line)
+    if not replaced:
+        out.append(f"BootStrapperInhibitAll={value}")
+    _atomic_write(target, "\n".join(out).rstrip() + "\n")
+
+
+def block_updates(steam_path: Path) -> None:
+    _set_inhibit(steam_path, "Enable")
 
 
 def unblock_updates(steam_path: Path) -> None:
-    target = steam_path / "steam.cfg"
-    _atomic_write(target, "BootStrapperInhibitAll=False\n")
+    _set_inhibit(steam_path, "False")

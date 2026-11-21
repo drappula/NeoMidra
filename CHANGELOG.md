@@ -2,9 +2,24 @@
 
 ## Unreleased
 
+### Added
+
+- Auto LC Setup can configure runtime manifest acquisition, ordered LuaTools/Hubcap/Ryuu sources, key type, status, and exact-manifest retry. SteaMidra exports protected provider credentials for LumaCore to use while SteaMidra is closed; DepotBox remains metadata-only until its manifest endpoint is verified.
+- Manifest downloads now validate depot/GID identity and bounded raw/ZIP structure before atomic publication. Hubcap generation shares quota reservations with LumaCore, and auto-update choices clear effective pins on reload.
+
+- **Outdated LumaCore warning** — Windows shows a once-per-launch warning when the installed LumaCore is older than the latest release, pointing at LumaCore setup; the classic UI's Check Version shows it again. Versions are now compared numerically, so an install that is ahead of GitHub no longer reports an update.
+
 ### Fixed
 
 - **Startup "Check for updates" consolidated into one non-blocking path** — there were two overlapping startup update checks: the legacy one in `Main_gui.py` (which ran `ui.check_updates` synchronously on the GUI thread, freezing the window on download) and a newer one. They have been merged into a single path in `SFFMainWindow._maybe_self_update_on_startup`: it honors "Check for updates on startup" (enabled by default; the Settings toggle disables it), runs `Updater.update_available()` off the GUI thread, and shows `SelfUpdateDialog` when a newer release exists (respecting a skipped version), with "Download Now" routed through the worker thread instead of blocking the UI. The dialog is now triggered on all platforms/UI modes instead of only on the Windows web-UI path.
+
+- **Library "Download" opens Steam again** — the button called `open_steam_install`, but `WebBridge` never exposed that slot, so QWebChannel dropped the call and nothing happened; the handler already existed in the misc bridges.
+
+- **Google Drive works in release builds** — `sff/core/_gc.py` is gitignored, so shipped binaries had no OAuth client and reported "Google Drive is not available in this build". Credentials now also come from `SFF_GDRIVE_CLIENT_ID`/`SFF_GDRIVE_CLIENT_SECRET` or `<data>/gdrive_client.json`, and the error says which.
+
+- **Steam updates re-enabled when the client build has no LumaCore pattern** — startup pattern prewarm now distinguishes a 404 (no pattern for this build) from a network failure. When both `steamclient` and `steamui` have no pattern and Steam auto-updates were blocked, SteaMidra re-enables `BootStrapperInhibitAll` and offers to restart Steam so the client can update to a supported build. `steam.cfg` writes now keep unrelated lines instead of replacing the file.
+
+- **Uninstall no longer aborts with "install folder not found: ...\~nsu1.tmp"** — the uninstaller pinned `$INSTDIR` to `$EXEDIR`, but NSIS copies the uninstaller into `%TEMP%\~nsuN.tmp` before running it, so the check always saw the temp directory and refused. It now reads the `InstallDir` value written at install time (falling back to the ARP `InstallLocation`), keeping the dedicated-folder name and exe guards.
 
 - **Manifest watcher copes with folders that refuse change notifications** — Windows answered `ReadDirectoryChangesW` with "Access is denied" (network shares, cloud-drive filter drivers, or a `depotcache` folder Steam recreated mid-update) and the watcher retried that call every second forever, filling the log while no manifest was being preserved. It now reopens the folder handle, and after three failures logs one warning and continues with the 5-second polling watcher.
 

@@ -329,7 +329,12 @@ def _bridge_gdrive_authorize(bridge):
     def _do():
         from sff.cloud.google_drive import authorize, is_available
         if not is_available():
-            return (False, "Google Drive is not available in this build.")
+            return (
+                False,
+                "Google Drive needs an OAuth client: set SFF_GDRIVE_CLIENT_ID and "
+                "SFF_GDRIVE_CLIENT_SECRET, or place gdrive_client.json "
+                '(with "client_id" and "client_secret") in the SteaMidra data folder.',
+            )
         log_lines = []
         ok = authorize(log_func=log_lines.append)
         return (ok, "\n".join(log_lines))

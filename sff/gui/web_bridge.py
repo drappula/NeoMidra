@@ -159,6 +159,7 @@ from sff.gui.bridges.misc_bridge import (
     _bridge_open_file_dialog,
     _bridge_open_folder_scan,
     _bridge_open_log_window,
+    _bridge_open_steam_install,
     _bridge_open_lua_file_dialog,
     _bridge_open_manifest_folder_dialog,
     _bridge_open_url,
@@ -566,7 +567,9 @@ class WebBridge(QObject):
     task_progress = pyqtSignal(str)
     log_message = pyqtSignal(str)
     lc_progress = pyqtSignal(str)
+    lc_version_checked = pyqtSignal(str)
     provider_key_dead = pyqtSignal(list)
+    manifest_runtime_ready = pyqtSignal(str)
 
     def __init__(self, ui, steam_path, parent=None):
         super().__init__(parent)
@@ -589,6 +592,8 @@ class WebBridge(QObject):
         self._hubcap_check_timer.start()
         self._workers = []  # prevent GC of running workers
         self._threads = []  # prevent GC of running QThreads
+        self._lc_version_check_running = False
+        self._lc_version_force_pending = False
         self._pending_deletes = {}  # app_id -> True: wipe files once engine stops
         self.download_progress.connect(self._record_progress)
         # 6.2.5: per-app update-available state cache. Populated by
@@ -2261,6 +2266,9 @@ class WebBridge(QObject):
     @pyqtSlot()
     def restart_steam(self):
         return _bridge_restart_steam(self)
+    @pyqtSlot(str)
+    def open_steam_install(self, app_id):
+        return _bridge_open_steam_install(self, app_id)
     @pyqtSlot()
     def open_log_window(self):
         return _bridge_open_log_window(self)
@@ -2284,7 +2292,7 @@ class WebBridge(QObject):
     @pyqtSlot(str, result=str)
     def steam_updates_set_state(self, action):
         return _bridge_steam_updates_set_state(self, action)
-    @pyqtSlot(str, result=str)
+    @pyqtSlot(str)
     def lumacore_check_update(self, _arg=""):
         return _bridge_lumacore_check_update(self, _arg)
     @pyqtSlot()
@@ -2341,6 +2349,33 @@ class WebBridge(QObject):
     @pyqtSlot(str, result=str)
     def get_setting(self, key):
         return _bridge_get_setting(self, key)
+
+    @pyqtSlot()
+    def manifest_runtime_get(self):
+        from sff.network.provider_credentials import runtime_settings
+        self._run_async(lambda: runtime_settings(self._steam_path),
+                        on_done=lambda data: self.manifest_runtime_ready.emit(json.dumps(dict(data, operation="get"))),
+                        on_error=lambda error: self.manifest_runtime_ready.emit(json.dumps({"operation": "get", "error": "Could not read runtime configuration."})))
+
+    @pyqtSlot(str)
+    def manifest_runtime_save(self, payload):
+        def save():
+            from sff.network.provider_credentials import save_runtime_settings
+            data = json.loads(payload)
+            return save_runtime_settings(self._steam_path, data["enabled"], data["sources"], data["ryuu_credential_type"])
+        self._run_async(save,
+                        on_done=lambda data: self.manifest_runtime_ready.emit(json.dumps(dict(data, saved=True, operation="save"))),
+                        on_error=lambda error: self.manifest_runtime_ready.emit(json.dumps({"operation": "save", "error": str(error)})))
+
+    @pyqtSlot(str, str)
+    def manifest_runtime_retry(self, depot, gid):
+        def retry():
+            from sff.network.provider_credentials import retry_manifest, runtime_settings
+            retry_manifest(self._steam_path, depot, gid)
+            return dict(runtime_settings(self._steam_path), retry_requested=True)
+        self._run_async(retry,
+                        on_done=lambda data: self.manifest_runtime_ready.emit(json.dumps(dict(data, operation="retry"))),
+                        on_error=lambda error: self.manifest_runtime_ready.emit(json.dumps({"operation": "retry", "error": "Could not queue manifest retry."})))
     @pyqtSlot(result=str)
     def provider_contribute_preview(self):
         return _bridge_provider_contribute_preview(self)

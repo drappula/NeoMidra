@@ -212,6 +212,8 @@ class SFFMainWindow(QMainWindow):
         self.self_update_ready.connect(self._show_self_update_dialog)
         self._worker = None
         self._worker_thread = None
+        self._warned_lumacore_pair = None
+        self._lumacore_update_dlg = None
         from sff.core.strings import VERSION
         self.setWindowTitle(f"SteaMidra Fork ({VERSION})")
         self.setMinimumSize(960, 700)
@@ -287,6 +289,7 @@ class SFFMainWindow(QMainWindow):
         self._web_channel = QWebChannel()
         from sff.gui.web_bridge import WebBridge
         self._web_bridge = WebBridge(ui=ui, steam_path=steam_path, parent=self)
+        self._web_bridge.lc_version_checked.connect(self._on_lumacore_version_checked)
         self._web_channel.registerObject("bridge", self._web_bridge)
         self._web_view.page().setWebChannel(self._web_channel)
         # Allow loading Steam CDN images from local file:// page
@@ -391,6 +394,8 @@ class SFFMainWindow(QMainWindow):
         # build without knowing why. Cleanup the log after surfacing so
         # subsequent launches don't re-warn.
         QTimer.singleShot(2 * 1000, self._surface_stale_updater_log)
+        if sys.platform == "win32":
+            QTimer.singleShot(3000, self._check_lumacore_update_on_startup)
 
     def _build_classic_ui(self, steam_path):
         if getattr(self, '_classic_ui_built', False):
@@ -992,7 +997,11 @@ class SFFMainWindow(QMainWindow):
             return
         logger.debug("startup self-update check scheduled")
         import threading
-        threading.Thread(target=self._self_update_check_thread, daemon=True).start()
+        threading.Thread(
+            target=self._self_update_check_thread,
+            name="sff-self-update-check",
+            daemon=True,
+        ).start()
 
     def _self_update_enabled(self):
         try:
@@ -1099,6 +1108,41 @@ class SFFMainWindow(QMainWindow):
             "SteaMidra downloaded the LumaCore patterns for the current Steam\n"
             "build. Restart Steam now to apply them?\n\n"
             "Any game downloading through Steam should be paused first.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply == QMessageBox.StandardButton.Yes and bridge is not None:
+            bridge.restart_steam()
+
+    def offer_steam_update_for_unsupported_build(self) -> None:
+        """No LumaCore pattern exists for the installed Steam build, so that
+        build cannot be supported however long it stays. Steam auto-updates
+        are the way out, so unblock them and tell the user.
+
+        Only a blocked steam.cfg is touched: an already-unblocked setup is
+        left alone, and re-enabling flips the state, so this prompts once per
+        block instead of every launch.
+        """
+        from PyQt6.QtWidgets import QMessageBox
+
+        from sff.quick_tools import steam_updates
+
+        try:
+            if steam_updates.get_state(self.steam_path) != "blocked":
+                return
+            steam_updates.unblock_updates(self.steam_path)
+        except Exception:
+            logger.warning("Could not re-enable Steam updates", exc_info=True)
+            return
+
+        bridge = getattr(self, "_web_bridge", None)
+        reply = QMessageBox.question(
+            self,
+            "Steam update required",
+            "LumaCore has no pattern for this Steam build — the client is older\n"
+            "than the builds it supports.\n\n"
+            "Steam auto-updates were re-enabled so the client can update.\n"
+            "Restart Steam now to update? Pause any running download first.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
         )
@@ -2049,6 +2093,60 @@ class SFFMainWindow(QMainWindow):
 
     # ── LumaCore Setup helpers ────────────────────────────────────
 
+    def _check_lumacore_update_on_startup(self):
+        if sys.platform != "win32" or getattr(self, "_quitting", False):
+            return
+        self._web_bridge.lumacore_check_update("")
+
+    def _on_lumacore_version_checked(self, payload):
+        import json
+
+        try:
+            result = json.loads(payload)
+        except (TypeError, ValueError) as exc:
+            logger.warning("Invalid LumaCore version check result: %s", exc)
+            return
+        if isinstance(result, dict):
+            self._show_lumacore_update_warning(result)
+        else:
+            logger.warning("Unexpected LumaCore version check result: %r", result)
+
+    def _show_lumacore_update_warning(self, result, force=False):
+        if sys.platform != "win32" or getattr(self, "_quitting", False):
+            return
+        installed = result.get("installed")
+        latest = result.get("latest")
+        if not result.get("update_available") or not installed or not latest:
+            return
+        pair = (installed, latest)
+        if not force and pair == self._warned_lumacore_pair:
+            logger.debug("LumaCore warning already shown for %s -> %s", installed, latest)
+            return
+        self._warned_lumacore_pair = pair
+        logger.warning("LumaCore is outdated: installed=%s latest=%s", installed, latest)
+
+        if self._lumacore_update_dlg is None:
+            dlg = QMessageBox(self)
+            dlg.setWindowTitle(T("LumaCore is outdated"))
+            dlg.setIcon(QMessageBox.Icon.Warning)
+            dlg.setTextFormat(Qt.TextFormat.PlainText)
+            dlg.setText(T(
+                "Steam modifications might not work properly when your LumaCore version is outdated."
+            ))
+            dlg.setStandardButtons(QMessageBox.StandardButton.Ok)
+            dlg.setDefaultButton(QMessageBox.StandardButton.Ok)
+            self._lumacore_update_dlg = dlg
+
+        if self._web_ui_active:
+            guidance = T("Use Auto LC Setup to install the latest LumaCore version.")
+        else:
+            guidance = T("Use Install / Update LumaCore to install the latest version.")
+        self._lumacore_update_dlg.setInformativeText(
+            T("Installed: {installed}\nLatest: {latest}").format(installed=installed, latest=latest)
+            + "\n\n" + guidance
+        )
+        self._lumacore_update_dlg.open()
+
     def _install_lumacore_gui(self):
         reply = QMessageBox.question(
             self,
@@ -2110,7 +2208,8 @@ class SFFMainWindow(QMainWindow):
             installed = result.get("installed") or T("not installed")
             latest = result.get("latest") or T("unknown")
             if result.get("update_available", False):
-                msg = T(f"Update available!\n\nInstalled: {installed}\nLatest: {latest}")
+                self._show_lumacore_update_warning(result, force=True)
+                return
             else:
                 msg = T(f"LumaCore is up to date.\n\nInstalled: {installed}\nLatest: {latest}")
             QMessageBox.information(self, T("LumaCore Version"), msg)

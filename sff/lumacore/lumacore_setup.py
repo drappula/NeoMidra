@@ -22,6 +22,7 @@ import logging
 import os
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -296,20 +297,24 @@ def _looks_like_pattern_toml(body: str, subdir: str) -> bool:
     return "rva" in body and "sig" in body
 
 
-def _download_pattern_body(subdir: str, sha: str, remote_dir: str) -> Optional[str]:
+def _download_pattern_body(subdir: str, sha: str, remote_dir: str) -> tuple[Optional[str], str]:
+    """Return (body, reason). reason is "ok", "absent" (404 — the pattern tree
+    has nothing for this Steam build) or "error" (network/server trouble)."""
     # MigoReleases' pattern branch keeps every module in its own folder;
     # a flat pattern/<sha>.toml is always a 404 now.
     if not remote_dir:
-        return None
+        return None, "error"
     url = f"{_PATTERN_REPO_RAW}/{remote_dir}/{sha}.toml"
     headers = {"Cache-Control": "no-cache", "Accept": "text/plain,*/*"}
     try:
         resp = httpx.get(url, headers=headers, timeout=10, follow_redirects=True)
+        if resp.status_code == 404:
+            return None, "absent"
         if resp.status_code == 200 and _looks_like_pattern_toml(resp.text, subdir):
-            return resp.text
+            return resp.text, "ok"
     except httpx.HTTPError:
         pass
-    return None
+    return None, "error"
     # Old mirrors (jsdelivr CDN + gitflic fallback) retired in favour of the
     # single MigoReleases pattern branch; see _PATTERN_REPO_* above.
 
@@ -324,8 +329,13 @@ def _write_pattern_cache(target: Path, body: str) -> None:
 def _prewarm_lumacore_patterns(
     steam_path: Path,
     callback: Optional[Callable[[str], None]],
-) -> None:
-    """Best-effort cache fill for offline Steam launches after install."""
+) -> tuple[bool, int, set[str]]:
+    """Best-effort cache fill for offline Steam launches after install.
+
+    Returns (all_patterns_ready, files_written, labels_with_no_pattern). A label
+    lands in the last set only when the pattern tree answers 404 for this
+    build's hash — a network failure is not proof the build is unsupported.
+    """
     # (label, binary, local subdir, remote folder). LumaCore caches steamclient
     # and steamui flat in pattern/ but the pattern branch stores them per-module.
     jobs = (
@@ -336,6 +346,7 @@ def _prewarm_lumacore_patterns(
     cache_root = steam_path / "lumacore" / "pattern"
     all_ready = True
     wrote = 0
+    absent: set[str] = set()
     for label, binary_path, subdir, remote_dir in jobs:
         if not binary_path.is_file():
             _progress(f"Pattern cache skipped for {label}: Steam DLL not found.", callback)
@@ -354,8 +365,10 @@ def _prewarm_lumacore_patterns(
             _progress(f"Pattern cache ready for {label}.", callback)
             continue
 
-        body = _download_pattern_body(subdir, sha, remote_dir)
+        body, reason = _download_pattern_body(subdir, sha, remote_dir)
         if body is None:
+            if reason == "absent":
+                absent.add(label)
             _progress(f"Pattern cache prewarm missed for {label}.", callback)
             all_ready = False
             continue
@@ -366,22 +379,23 @@ def _prewarm_lumacore_patterns(
         except OSError as exc:
             _progress(f"Pattern cache write failed for {label}: {exc}", callback)
             all_ready = False
-    return all_ready, wrote
+    return all_ready, wrote, absent
 
 
-def prewarm_pattern_cache_if_missing(steam_path) -> tuple[bool, int]:
+def prewarm_pattern_cache_if_missing(steam_path) -> tuple[bool, int, set[str]]:
     """Run at app startup — fill missing LumaCore pattern TOMLs for the current
     Steam client build if LumaCore is installed. No-op otherwise. Returns
-    (all_current_patterns_present, new_pattern_files_written)."""
+    (all_current_patterns_present, new_pattern_files_written,
+    labels_with_no_pattern_for_this_build)."""
     try:
         if not steam_path:
-            return True, 0
+            return True, 0, set()
         if not (steam_path / "LumaCore.dll").is_file() and not (steam_path / "xinput1_4.dll").is_file():
-            return True, 0
+            return True, 0, set()
         return _prewarm_lumacore_patterns(steam_path, None)
     except Exception as exc:
         logger.debug("Startup LumaCore pattern prewarm skipped: %s", exc)
-        return False, 0
+        return False, 0, set()
 
 
 def _fetch_release_asset(variant: str = "release") -> Optional[tuple[str, str]]:
@@ -611,7 +625,9 @@ def install_lumacore(
         logger.warning("LumaCore pattern cache prewarm failed: %s", exc)
         _progress(f"Pattern cache prewarm failed: {exc}", progress_callback)
 
-    msg = "LumaCore installed."
+    from sff.network.provider_credentials import sync_runtime_configuration
+    synced = sync_runtime_configuration(steam_path)
+    msg = "LumaCore installed." if synced else "LumaCore installed. Provider configuration could not be synchronized."
     _progress(msg, progress_callback)
     # Record the version we just installed so check_for_lumacore_update can
     # compare against the latest GitHub release on subsequent launches. Best
@@ -631,8 +647,7 @@ def install_lumacore(
 #
 # Releases on github.com/drappula/LumaCore are tagged like "V37", "V38", etc.
 # The release name is "LumaCore V4". We compare the latest tag from GitHub
-# against the value cached in settings under LUMACORE_INSTALLED_VERSION and
-# treat a mismatch as "update available".
+# against the value cached in settings under LUMACORE_INSTALLED_VERSION.
 #
 # Cadence: at most one HTTP probe per 6 hours, regardless of how many times
 # this runs in a session. Cached result lives in Settings.LUMACORE_LAST_CHECK
@@ -658,6 +673,15 @@ def _normalise_lc_version(raw: str) -> str:
     if token.startswith(("v", "V")):
         token = "V" + token[1:]
     return token
+
+
+def _lc_version_parts(raw: str) -> tuple[int, ...]:
+    version = _normalise_lc_version(raw)
+    if not re.fullmatch(r"V?[0-9]+(?:\.[0-9]+)*", version):
+        if version:
+            logger.debug("Unrecognised LumaCore version: %r", raw)
+        return ()
+    return tuple(int(part) for part in version.lstrip("V").split("."))
 
 
 def _fetch_latest_release_tag(timeout: float = 10.0) -> Optional[str]:
@@ -728,7 +752,7 @@ def check_for_lumacore_update(steam_path: Path, force: bool = False) -> dict:
     release. Returns a dict with:
         installed:        version currently on disk (or "" if absent)
         latest:           latest version on GitHub (or "" on network failure)
-        update_available: True when the two differ AND both are populated
+        update_available: True when the installed version is older
         checked_at:       unix timestamp of the network probe (or cache hit)
         source:           "remote" if we hit GitHub this call, "cache" otherwise
 
@@ -740,6 +764,7 @@ def check_for_lumacore_update(steam_path: Path, force: bool = False) -> dict:
     from sff.core.storage.settings import get_setting, set_setting
     from sff.core.structs import Settings
 
+    logger.debug("Checking LumaCore version in %s (force=%s)", steam_path, force)
     installed = get_installed_lumacore_version(steam_path)
 
     cached_latest = _normalise_lc_version(
@@ -771,11 +796,24 @@ def check_for_lumacore_update(steam_path: Path, force: bool = False) -> dict:
             source = "remote"
         else:
             # Network miss — fall back to whatever we already have.
+            logger.debug("LumaCore version check using cached release after fetch failure")
             latest = cached_latest
             checked_at = last_check
             source = "cache"
 
-    update_available = bool(installed and latest and installed != latest)
+    installed_parts = _lc_version_parts(installed)
+    latest_parts = _lc_version_parts(latest)
+    width = max(len(installed_parts), len(latest_parts))
+    update_available = bool(
+        installed_parts
+        and latest_parts
+        and installed_parts + (0,) * (width - len(installed_parts))
+        < latest_parts + (0,) * (width - len(latest_parts))
+    )
+    logger.debug(
+        "LumaCore version check: installed=%s latest=%s update_available=%s source=%s",
+        installed, latest, update_available, source,
+    )
     return {
         "installed": installed,
         "latest": latest,
