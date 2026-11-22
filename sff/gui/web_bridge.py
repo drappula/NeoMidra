@@ -526,7 +526,7 @@ def _pick_crack_fix(entry):
 _PROVIDER_KEY_SITES = {
     "Hubcap": "https://hubcapmanifest.com/",
     "Ryuu": "https://generator.ryuu.lol/api",
-    "DepotBox": "https://depotbox.org",
+    "DepotBox": "https://depotbox.lol",
 }
 
 # Persisted "this provider's key got a definite rejection" flags, written by
@@ -1031,7 +1031,7 @@ class WebBridge(QObject):
         def _probe_depotbox(key):
             import httpx as _httpx
             try:
-                r = _httpx.get("https://depotbox.org/api/direct-lua?appid=440",
+                r = _httpx.get("https://depotbox.lol/api/direct-lua?appid=440",
                     headers={"X-API-Key": key}, timeout=30, follow_redirects=True)
             except Exception:
                 return "unknown"

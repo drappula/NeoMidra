@@ -757,7 +757,7 @@ def get_depotbox(dest, app_id, depotbox_key=None, depotcache=None):
                 lambda x: len(x.strip()) >= 20,
                 "That doesn't look like a DepotBox API key!",
                 long_instruction=(
-                    "Get an API key from https://depotbox.org — Starter (60 req/min) or Pro (120 req/min)."
+                    "Get an API key from https://depotbox.lol — Starter (60 req/min) or Pro (120 req/min)."
                 ),
             ).strip()
             set_setting(Settings.DEPOTBOX_KEY, depotbox_key)
@@ -777,7 +777,7 @@ def get_depotbox(dest, app_id, depotbox_key=None, depotcache=None):
         set_setting(Settings.DEPOTBOX_RATE_LIMIT, str(rate_limit))
 
     headers = {"X-API-Key": depotbox_key}
-    url = f"https://depotbox.org/api/direct-lua?appid={app_id}"
+    url = f"https://depotbox.lol/api/direct-lua?appid={app_id}"
 
     try:
         resp = httpx.get(url, headers=headers, timeout=(10, 300), follow_redirects=True)
@@ -859,7 +859,7 @@ def fetch_build_details(build_id):
     build_id = str(build_id).strip()
     if not build_id.isdigit() or build_id == "0" or len(build_id) > 12:
         return None
-    url = f"https://depotbox.org/api/depotboxtool/v1/build-details?build_id={build_id}"
+    url = f"https://depotbox.lol/api/depotboxtool/v1/build-details?build_id={build_id}"
     headers = {"x-api-key": _resolve_build_details_key()}
     try:
         resp = httpx.get(url, headers=headers, timeout=(10, 120), follow_redirects=True)
